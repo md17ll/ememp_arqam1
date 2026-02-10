@@ -1,63 +1,75 @@
 import os
 import requests
 
-API_BASE = os.getenv("PROVIDER_API_BASE")
-API_KEY = os.getenv("PROVIDER_API_KEY")
+API_BASE = (os.getenv("PROVIDER_API_BASE") or "").rstrip("/")
+API_KEY = (os.getenv("PROVIDER_API_KEY") or "").strip()
 
 
-class Provider:
+class ProviderError(Exception):
+    pass
 
-    @staticmethod
-    def create_order(service_id: str, country_id: str):
-        """
-        Generic create order request
-        """
-        url = f"{API_BASE}/create-order"
 
-        params = {
-            "api_key": API_KEY,
-            "service": service_id,
-            "country": country_id
-        }
+def _check_config():
+    if not API_BASE:
+        raise ProviderError("PROVIDER_API_BASE is missing")
+    if not API_KEY:
+        raise ProviderError("PROVIDER_API_KEY is missing")
 
-        try:
-            r = requests.get(url, params=params, timeout=20)
-            return r.json()
-        except Exception as e:
-            return {"status": "ERROR", "message": str(e)}
 
-    @staticmethod
-    def order_status(order_id: str):
-        """
-        Generic order status
-        """
-        url = f"{API_BASE}/order-status"
+def create_order(service: str, country: str) -> dict:
+    """
+    Create an order.
+    Expected response example:
+    {"status":"success","id":"123","number":"+4477....","cost":0.5}
+    """
+    _check_config()
 
-        params = {
-            "api_key": API_KEY,
-            "order_id": order_id
-        }
+    url = f"{API_BASE}/create-order"
+    params = {"api_key": API_KEY, "service": service, "country": country}
 
-        try:
-            r = requests.get(url, params=params, timeout=20)
-            return r.json()
-        except Exception as e:
-            return {"status": "ERROR", "message": str(e)}
+    r = requests.get(url, params=params, timeout=30)
+    data = r.json()
 
-    @staticmethod
-    def cancel_order(order_id: str):
-        """
-        Generic cancel order
-        """
-        url = f"{API_BASE}/cancel-order"
+    if str(data.get("status")).lower() not in ("success", "ok", "true"):
+        raise ProviderError(f"create_order failed: {data}")
 
-        params = {
-            "api_key": API_KEY,
-            "order_id": order_id
-        }
+    provider_order_id = data.get("id") or data.get("order_id")
+    number = data.get("number") or data.get("phone") or data.get("phone_number")
+    cost = data.get("cost")
 
-        try:
-            r = requests.get(url, params=params, timeout=20)
-            return r.json()
-        except Exception as e:
-            return {"status": "ERROR", "message": str(e)}
+    if not provider_order_id or not number:
+        raise ProviderError(f"create_order missing fields: {data}")
+
+    return {"provider_order_id": str(provider_order_id), "number": str(number), "cost": cost}
+
+
+def order_status(provider_order_id: str) -> dict:
+    """
+    Get order status / SMS code.
+    Expected response example:
+    {"status":"success","state":"waiting"} OR {"status":"success","state":"received","sms_code":"1234"}
+    """
+    _check_config()
+
+    url = f"{API_BASE}/order-status"
+    params = {"api_key": API_KEY, "order_id": provider_order_id}
+
+    r = requests.get(url, params=params, timeout=30)
+    data = r.json()
+    return data
+
+
+def cancel_order(provider_order_id: str) -> dict:
+    """
+    Cancel order.
+    Expected response example:
+    {"status":"success","state":"cancelled"}
+    """
+    _check_config()
+
+    url = f"{API_BASE}/cancel-order"
+    params = {"api_key": API_KEY, "order_id": provider_order_id}
+
+    r = requests.get(url, params=params, timeout=30)
+    data = r.json()
+    return data
