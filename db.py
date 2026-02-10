@@ -376,3 +376,85 @@ def list_user_ids_nonbanned() -> List[int]:
     cur.close()
     conn.close()
     return ids
+
+
+# ---------- Orders (Provider integration helpers) ----------
+def create_order_row(
+    user_id: int,
+    country: str,
+    service_code: str,
+    sell_price: float,
+    provider_order_id: str,
+    phone_number: str,
+    status: str = "waiting",
+) -> int:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO orders(user_id, country, service_code, sell_price, provider_order_id, phone_number, status)
+        VALUES(%s,%s,%s,%s,%s,%s,%s)
+        RETURNING id
+    """, (user_id, country, service_code, sell_price, provider_order_id, phone_number, status))
+    oid = int(cur.fetchone()[0])
+    conn.commit()
+    cur.close()
+    conn.close()
+    return oid
+
+
+def get_order(order_id: int, user_id: Optional[int] = None) -> Optional[Dict]:
+    conn = _conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    if user_id is None:
+        cur.execute("SELECT * FROM orders WHERE id=%s", (order_id,))
+    else:
+        cur.execute("SELECT * FROM orders WHERE id=%s AND user_id=%s", (order_id, user_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_orders_for_user(user_id: int, limit: int = 10) -> List[Dict]:
+    conn = _conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cur.execute("""
+        SELECT * FROM orders
+        WHERE user_id=%s
+        ORDER BY id DESC
+        LIMIT %s
+    """, (user_id, limit))
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
+def set_order_status(order_id: int, status: str) -> None:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE orders SET status=%s, updated_at=NOW() WHERE id=%s", (status, order_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def set_order_sms(order_id: int, sms_code: str) -> None:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE orders SET sms_code=%s, status='received', updated_at=NOW()
+        WHERE id=%s
+    """, (sms_code, order_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def set_order_cancelled(order_id: int) -> None:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE orders SET status='cancelled', updated_at=NOW() WHERE id=%s", (order_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
