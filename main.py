@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from decimal import Decimal
 from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -11,7 +10,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    ConversationHandler,
     MessageHandler,
     filters,
 )
@@ -20,22 +18,7 @@ import db
 from config import BOT_TOKEN, ADMIN_IDS, SHOW_ADMIN_BUTTON_FOR_ADMINS
 
 
-# ------------------- Constants / States -------------------
-(
-    ADMIN_ADD_BAL_UID, ADMIN_ADD_BAL_AMT,
-    ADMIN_DED_BAL_UID, ADMIN_DED_BAL_AMT,
-    ADMIN_ALLOW_UID,
-    ADMIN_DENY_UID,
-    ADMIN_BAN_UID,
-    ADMIN_UNBAN_UID,
-    ADMIN_SET_PRICE,
-    ADMIN_SET_LIMIT_UID, ADMIN_SET_LIMIT_VAL,
-    ADMIN_EDIT_START,
-    ADMIN_BROADCAST,
-    TOPUP_AMOUNT,
-    ADMIN_DECIDE_TOPUP_ID,
-) = range(18)
-
+# ------------------- Constants / States (via context.user_data flags) -------------------
 CB_MAIN = "main"
 CB_BAL = "bal"
 CB_BUY = "buy"
@@ -45,7 +28,7 @@ CB_PROFILE = "profile"
 CB_HELP = "help"
 CB_ADMIN = "admin"
 
-# Admin menu callback roots
+# Admin sections
 CB_A_USERS = "a_users"
 CB_A_WALLET = "a_wallet"
 CB_A_ORDERS = "a_orders"
@@ -56,7 +39,6 @@ CB_A_MSGS = "a_msgs"
 # Admin wallet actions
 CB_A_ADD_BAL = "a_add_bal"
 CB_A_DED_BAL = "a_ded_bal"
-CB_A_USER_BAL = "a_user_bal"   # simple view
 CB_A_TOPUP_REQS = "a_topup_reqs"
 
 # Admin users actions
@@ -139,16 +121,14 @@ def gate_user(user_id: int) -> tuple[bool, str]:
     return True, ""
 
 
-async def safe_edit(query, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
-    # Avoid edit error if message unchanged
+async def safe_edit(query, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None, parse_mode=None):
     try:
-        await query.edit_message_text(text=text, reply_markup=reply_markup)
+        await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception:
-        # fallback: resend
-        await query.message.reply_text(text=text, reply_markup=reply_markup)
+        await query.message.reply_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 
-# ------------------- User: /start -------------------
+# ------------------- /start -------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     db.ensure_user(user_id)
@@ -158,9 +138,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
-    start_msg = db.get_start_message()
     await update.message.reply_text(
-        start_msg,
+        db.get_start_message(),
         reply_markup=k_main(is_admin(user_id))
     )
 
@@ -170,14 +149,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-
-    # Gate for non-admin actions (admin also passes)
-    ok, msg = gate_user(user_id)
-    if not ok and query.data != CB_ADMIN:
-        await safe_edit(query, msg, reply_markup=None)
-        return
-
     data = query.data
+
+    # Gate for non-admin
+    ok, msg = gate_user(user_id)
+    if not ok and data != CB_ADMIN:
+        await safe_edit(query, msg)
+        return
 
     # Main navigation
     if data == CB_MAIN:
@@ -186,8 +164,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == CB_BAL:
         u = db.ensure_user(user_id)
-        text = f"💰 رصيدك الحالي: **{u.balance:.2f}$**"
-        await safe_edit(query, text, reply_markup=k_back(CB_MAIN))
+        await safe_edit(query, f"💰 رصيدك الحالي: **{u.balance:.2f}$**", reply_markup=k_back(CB_MAIN), parse_mode=ParseMode.MARKDOWN)
         return
 
     if data == CB_PROFILE:
@@ -201,9 +178,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📌 الحالة: {'✅ مفعل' if u.is_allowed or is_admin(user_id) else '⛔ غير مفعل'}\n"
             f"🛡 الحظر: {'🚫 محظور' if u.is_banned else '✅ لا'}\n"
             f"📆 حد اليوم: **{u.daily_limit}**\n"
-            f"📊 مستخدم اليوم: **{u.daily_count}/{u.daily_limit}**"
+            f"📊 استخدام اليوم: **{u.daily_count}/{u.daily_limit}**"
         )
-        await safe_edit(query, text, reply_markup=k_back(CB_MAIN))
+        await safe_edit(query, text, reply_markup=k_back(CB_MAIN), parse_mode=ParseMode.MARKDOWN)
         return
 
     if data == CB_HELP:
@@ -214,10 +191,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• زر **شراء رصيد** يرسل طلب شحن للأدمن.\n"
             "• يمكنك رؤية ID الخاص بك من **حسابي**."
         )
-        await safe_edit(query, text, reply_markup=k_back(CB_MAIN))
+        await safe_edit(query, text, reply_markup=k_back(CB_MAIN), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Buy number (provider integration intentionally omitted)
+    # Buy number (STUB)
     if data == CB_BUY:
         u = db.ensure_user(user_id)
         db.reset_daily_if_needed(user_id)
@@ -233,8 +210,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(query, f"رصيدك غير كافي.\nالسعر: {price:.2f}$", reply_markup=k_back(CB_MAIN))
             return
 
-        # NOTE: Here you would call provider API (not included).
-        # For now, simulate an order creation record only.
+        # Here provider integration would happen (not included).
         if not is_admin(user_id):
             db.deduct_balance(user_id, price, kind="deduct", note="Buy UK temp number (stub)")
             db.increment_daily(user_id)
@@ -248,13 +224,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == CB_ORDERS:
-        # orders table prepared; show last few
-        # Keeping it minimal here (no provider integration)
         await safe_edit(
             query,
-            "📩 **طلباتي**\n\nحالياً: لا يوجد عرض تلقائي للأكواد لأن ربط المزود غير مفعّل في هذه النسخة.\n"
+            "📩 **طلباتي**\n\n"
+            "حالياً: ربط المزود غير مفعّل في هذه النسخة، لذلك لا يتم عرض الأكواد.\n"
             "عند تفعيل الربط سيتم عرض الطلبات هنا.",
-            reply_markup=k_back(CB_MAIN)
+            reply_markup=k_back(CB_MAIN),
+            parse_mode=ParseMode.MARKDOWN
         )
         return
 
@@ -267,7 +243,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📝 طلب شحن", callback_data="topup_req")],
                 [InlineKeyboardButton("🔙 رجوع", callback_data=CB_MAIN)]
-            ])
+            ]),
+            parse_mode=ParseMode.MARKDOWN
         )
         return
 
@@ -281,10 +258,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(user_id):
             await safe_edit(query, "🚫 غير مصرح.", reply_markup=k_back(CB_MAIN))
             return
-        await safe_edit(query, "🛠 **لوحة الأدمن**", reply_markup=k_admin_main())
+        await safe_edit(query, "🛠 **لوحة الأدمن**", reply_markup=k_admin_main(), parse_mode=ParseMode.MARKDOWN)
         return
 
-    if not is_admin(user_id) and data.startswith("a_"):
+    if data.startswith("a_") and not is_admin(user_id):
         await safe_edit(query, "🚫 غير مصرح.", reply_markup=k_back(CB_MAIN))
         return
 
@@ -296,7 +273,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🚫 حظر مستخدم", callback_data=CB_A_BAN)],
             [InlineKeyboardButton("✅ فك الحظر", callback_data=CB_A_UNBAN)],
             [InlineKeyboardButton("🔙 رجوع", callback_data=CB_ADMIN)],
-        ]))
+        ]), parse_mode=ParseMode.MARKDOWN)
         return
 
     if data == CB_A_WALLET:
@@ -305,11 +282,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("➖ خصم رصيد", callback_data=CB_A_DED_BAL)],
             [InlineKeyboardButton("🔔 طلبات الشحن", callback_data=CB_A_TOPUP_REQS)],
             [InlineKeyboardButton("🔙 رجوع", callback_data=CB_ADMIN)],
-        ]))
+        ]), parse_mode=ParseMode.MARKDOWN)
         return
 
     if data == CB_A_ORDERS:
-        await safe_edit(query, "📦 **إدارة الطلبات**\n\n(جاهزة للربط لاحقاً عبر جدول orders)", reply_markup=k_back(CB_ADMIN))
+        await safe_edit(query, "📦 **إدارة الطلبات**\n\n(جاهزة للربط لاحقاً عبر جدول orders)", reply_markup=k_back(CB_ADMIN), parse_mode=ParseMode.MARKDOWN)
         return
 
     if data == CB_A_STATS:
@@ -321,7 +298,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔁 العمليات اليوم: {s['tx_count']}\n"
             f"💵 صافي حركة الرصيد اليوم: {s['sum_amount']:.2f}$"
         )
-        await safe_edit(query, text, reply_markup=k_back(CB_ADMIN))
+        await safe_edit(query, text, reply_markup=k_back(CB_ADMIN), parse_mode=ParseMode.MARKDOWN)
         return
 
     if data == CB_A_SETTINGS:
@@ -333,7 +310,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🛠 تشغيل الصيانة", callback_data=CB_A_MAINT_ON)],
             [InlineKeyboardButton("✅ إيقاف الصيانة", callback_data=CB_A_MAINT_OFF)],
             [InlineKeyboardButton("🔙 رجوع", callback_data=CB_ADMIN)],
-        ]))
+        ]), parse_mode=ParseMode.MARKDOWN)
         return
 
     if data == CB_A_MSGS:
@@ -341,7 +318,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("✏️ تعديل رسالة /start", callback_data=CB_A_EDIT_START)],
             [InlineKeyboardButton("📢 رسالة جماعية", callback_data=CB_A_BROADCAST)],
             [InlineKeyboardButton("🔙 رجوع", callback_data=CB_ADMIN)],
-        ]))
+        ]), parse_mode=ParseMode.MARKDOWN)
         return
 
     # Admin: maintenance toggle
@@ -373,7 +350,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton(f"❌ #{rid}", callback_data=f"{CB_A_REJECT_PREFIX}{rid}"),
             ])
         rows.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB_ADMIN)])
-        await safe_edit(query, "\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
+        await safe_edit(query, "\n".join(lines), reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.MARKDOWN)
         return
 
     # Admin: approve/reject topup
@@ -388,12 +365,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if approve:
             db.add_balance(tuid, amt, kind="topup", note=f"Topup approved #{rid}")
             db.admin_log(user_id, "topup_approved", {"req_id": rid, "user_id": tuid, "amount": amt})
-            # notify user
             try:
                 await context.bot.send_message(chat_id=tuid, text=f"✅ تم شحن رصيدك بمبلغ {amt:.2f}$")
             except Exception:
                 pass
-            await safe_edit(query, f"✅ تمت الموافقة وشحن {amt:.2f}$ للمستخدم `{tuid}`.", reply_markup=k_back(CB_ADMIN))
+            await safe_edit(query, f"✅ تمت الموافقة وشحن {amt:.2f}$ للمستخدم `{tuid}`.", reply_markup=k_back(CB_ADMIN), parse_mode=ParseMode.MARKDOWN)
         else:
             db.admin_log(user_id, "topup_rejected", {"req_id": rid, "user_id": tuid, "amount": amt})
             try:
@@ -403,9 +379,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(query, f"❌ تم رفض الطلب #{rid}.", reply_markup=k_back(CB_ADMIN))
         return
 
-    # Admin: action triggers that switch to conversation states
+    # Admin action prompts (handled in on_text)
     if data in (CB_A_ADD_BAL, CB_A_DED_BAL, CB_A_ALLOW, CB_A_DENY, CB_A_BAN, CB_A_UNBAN, CB_A_SET_PRICE, CB_A_SET_LIMIT, CB_A_EDIT_START, CB_A_BROADCAST):
-        # handled by conversation handlers via entry points (we just prompt here)
         if data == CB_A_ADD_BAL:
             context.user_data["admin_action"] = "addbal"
             await safe_edit(query, "🆔 أرسل ID المستخدم:", reply_markup=k_back(CB_ADMIN))
@@ -447,11 +422,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(query, "📢 أرسل الرسالة التي تريد إرسالها للجميع:", reply_markup=k_back(CB_ADMIN))
             return
 
-    # fallback
     await safe_edit(query, "⚠️ أمر غير معروف.", reply_markup=k_back(CB_MAIN))
 
 
-# ------------------- Message handler (topup + admin prompts) -------------------
+# ------------------- Text handler -------------------
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = (update.message.text or "").strip()
@@ -463,12 +437,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not ok:
             await update.message.reply_text(msg)
             return
+
         amt = money_ok(text)
         if amt is None:
             await update.message.reply_text("⛔ صيغة غير صحيحة. اكتب رقم مثل: 5 أو 10.5")
             return
 
         req_id = db.create_topup_request(user_id, amt)
+
         # notify admins
         for aid in ADMIN_IDS:
             try:
@@ -483,7 +459,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ تم إرسال طلب الشحن (#{req_id}). سيتم مراجعته من الإدارة.")
         return
 
-    # Admin prompts driven by context.user_data["admin_action"]
+    # Admin prompts
     if is_admin(user_id) and context.user_data.get("admin_action"):
         action = context.user_data.get("admin_action")
 
@@ -627,12 +603,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("admin_action", None)
             msg = text
 
-            # fetch all user ids
-            conn = db._conn()  # internal usage
-            cur = conn.cursor()
-            cur.execute("SELECT user_id FROM users WHERE is_banned=FALSE")
-            user_ids = [int(r[0]) for r in cur.fetchall()]
-            cur.close(); conn.close()
+            user_ids = db.list_user_ids_nonbanned()
 
             sent = 0
             for uid in user_ids:
@@ -646,24 +617,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ تم إرسال الرسالة إلى {sent} مستخدم.")
             return
 
-    # Default: show start again
+    # Default
     await update.message.reply_text("اكتب /start لفتح القائمة.")
 
 
-# ------------------- Startup checks -------------------
+# ------------------- Main -------------------
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is missing")
     if not ADMIN_IDS:
         raise RuntimeError("ADMIN_IDS is missing (comma-separated)")
-
+    # DATABASE_URL is validated when db connects; but better to fail early if empty:
+    # (db will raise clearer error if missing)
     db.init_db()
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
