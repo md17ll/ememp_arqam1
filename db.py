@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -74,7 +74,7 @@ def init_db() -> None:
     )
     """)
 
-    # Prepared for future (do NOT integrate provider API here):
+    # Prepared for future provider integration (not implemented here)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS orders(
         id SERIAL PRIMARY KEY,
@@ -91,7 +91,6 @@ def init_db() -> None:
     )
     """)
 
-    # Defaults
     _set_default(cur, "price_usd", str(DEFAULT_PRICE_USD))
     _set_default(cur, "maintenance", "0")
     _set_default(cur, "start_message", DEFAULT_START_MESSAGE())
@@ -198,15 +197,6 @@ def ensure_user(user_id: int) -> User:
     return user
 
 
-def update_user_updated_at(user_id: int) -> None:
-    conn = _conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET updated_at=NOW() WHERE user_id=%s", (user_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
 def set_allowed(user_id: int, allowed: bool) -> None:
     conn = _conn()
     cur = conn.cursor()
@@ -255,10 +245,7 @@ def reset_daily_if_needed(user_id: int) -> None:
 def increment_daily(user_id: int) -> None:
     conn = _conn()
     cur = conn.cursor()
-    cur.execute("""
-        UPDATE users SET daily_count=daily_count+1, updated_at=NOW()
-        WHERE user_id=%s
-    """, (user_id,))
+    cur.execute("UPDATE users SET daily_count=daily_count+1, updated_at=NOW() WHERE user_id=%s", (user_id,))
     conn.commit()
     cur.close()
     conn.close()
@@ -289,20 +276,6 @@ def deduct_balance(user_id: int, amount: float, kind: str, note: str | None = No
     conn.commit()
     cur.close()
     conn.close()
-
-
-def get_recent_transactions(user_id: int, limit: int = 10) -> List[Tuple]:
-    conn = _conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT amount, kind, note, created_at
-        FROM transactions WHERE user_id=%s
-        ORDER BY id DESC LIMIT %s
-    """, (user_id, limit))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows
 
 
 # ---------- Topup Requests ----------
@@ -371,6 +344,7 @@ def admin_log(admin_id: int, action: str, payload: Dict[str, Any] | None = None)
 def stats_today() -> Dict[str, Any]:
     conn = _conn()
     cur = conn.cursor()
+
     cur.execute("SELECT COUNT(*) FROM transactions WHERE created_at::date = CURRENT_DATE")
     tx_count = int(cur.fetchone()[0])
 
@@ -391,3 +365,14 @@ def stats_today() -> Dict[str, Any]:
         "users_count": users_count,
         "active_today": active_today,
     }
+
+
+# ---------- User listing (for broadcast) ----------
+def list_user_ids_nonbanned() -> List[int]:
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users WHERE is_banned=FALSE")
+    ids = [int(r[0]) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return ids
