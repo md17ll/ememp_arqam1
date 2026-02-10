@@ -1,28 +1,23 @@
 import os
 
 # Telegram
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# Admins (مثال: 123456789,987654321)
+# Admin IDs: comma-separated, example: "123456789,987654321"
 ADMIN_IDS = [
-    int(x) for x in os.getenv("ADMIN_IDS", "").split(",")
+    int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 ]
 
-# Database (Railway Postgres)
-DATABASE_URL = os.getenv("DATABASE_URL")
+# Railway Postgres
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
-# API key (سيستخدم لاحقاً عند ربط مزود الأرقام)
-HOTSIM_API_KEY = os.getenv("HOTSIM_API_KEY")
+# (Optional) Provider API key - reserved for later integration
+HOTSIM_API_KEY = os.getenv("HOTSIM_API_KEY", "").strip()
 
-# السعر الافتراضي للرقم
-PRICE_PER_NUMBER = float(os.getenv("PRICE_PER_NUMBER", "0.5"))
-
-# الحد اليومي الافتراضي لكل مستخدم
+# Defaults used by db.py/settings
+DEFAULT_PRICE_USD = float(os.getenv("DEFAULT_PRICE_USD", "0.5"))
 DEFAULT_DAILY_LIMIT = int(os.getenv("DEFAULT_DAILY_LIMIT", "5"))
 
-# هل يظهر زر الادمن في القائمة الرئيسية
-SHOW_ADMIN_BUTTON_FOR_ADMINS = os.getenv(
-    "SHOW_ADMIN_BUTTON_FOR_ADMINS",
-    "1"
-) == "1"
+# UI behavior
+SHOW_ADMIN_BUTTON_FOR_ADMINS = os.getenv("SHOW_ADMIN_BUTTON_FOR_ADMINS", "1").strip() == "1"
