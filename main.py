@@ -15,6 +15,7 @@ from telegram.ext import (
 )
 
 import db
+import provider  # ✅ NEW
 from config import BOT_TOKEN, ADMIN_IDS, SHOW_ADMIN_BUTTON_FOR_ADMINS
 
 
@@ -27,6 +28,10 @@ CB_ORDERS = "orders"
 CB_PROFILE = "profile"
 CB_HELP = "help"
 CB_ADMIN = "admin"
+
+# Orders actions (user)
+CB_ORDER_REFRESH_PREFIX = "ord_ref_"  # +order_id
+CB_ORDER_CANCEL_PREFIX = "ord_can_"   # +order_id
 
 # Admin sections
 CB_A_USERS = "a_users"
@@ -128,6 +133,14 @@ async def safe_edit(query, text: str, reply_markup: Optional[InlineKeyboardMarku
         await query.message.reply_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 
+def k_order_actions(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 تحديث الكود", callback_data=f"{CB_ORDER_REFRESH_PREFIX}{order_id}")],
+        [InlineKeyboardButton("❌ إلغاء الطلب", callback_data=f"{CB_ORDER_CANCEL_PREFIX}{order_id}")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=CB_MAIN)],
+    ])
+
+
 # ------------------- /start -------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -157,7 +170,65 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(query, msg)
         return
 
-    # Main navigation
+    # -------- Orders: Refresh / Cancel handlers --------
+    if data.startswith(CB_ORDER_REFRESH_PREFIX):
+        order_id = int(data.replace(CB_ORDER_REFRESH_PREFIX, ""))
+        o = db.get_order(order_id, user_id=None if is_admin(user_id) else user_id)
+        if not o:
+            await safe_edit(query, "⛔ الطلب غير موجود.", reply_markup=k_back(CB_MAIN))
+            return
+
+        try:
+            st = provider.order_status(o["provider_order_id"])
+        except Exception as e:
+            await safe_edit(query, f"⛔ فشل التحديث من المزوّد:\n{e}", reply_markup=k_back(CB_MAIN))
+            return
+
+        sms = st.get("sms_code") or st.get("code") or st.get("otp")
+        state = st.get("state") or st.get("status") or o.get("status") or "waiting"
+
+        if sms:
+            db.set_order_sms(order_id, str(sms))
+            await safe_edit(
+                query,
+                f"✅ وصل الكود للطلب #{order_id}\n\n"
+                f"📞 الرقم: {o.get('phone_number')}\n"
+                f"🔐 الكود: **{sms}**",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 تحديث مرة أخرى", callback_data=f"{CB_ORDER_REFRESH_PREFIX}{order_id}")],
+                    [InlineKeyboardButton("🔙 رجوع", callback_data=CB_MAIN)],
+                ]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            db.set_order_status(order_id, "waiting")
+            await safe_edit(
+                query,
+                f"⏳ لم يصل كود بعد للطلب #{order_id}\n"
+                f"📞 الرقم: {o.get('phone_number')}\n"
+                f"الحالة: {state}",
+                reply_markup=k_order_actions(order_id)
+            )
+        return
+
+    if data.startswith(CB_ORDER_CANCEL_PREFIX):
+        order_id = int(data.replace(CB_ORDER_CANCEL_PREFIX, ""))
+        o = db.get_order(order_id, user_id=None if is_admin(user_id) else user_id)
+        if not o:
+            await safe_edit(query, "⛔ الطلب غير موجود.", reply_markup=k_back(CB_MAIN))
+            return
+
+        try:
+            provider.cancel_order(o["provider_order_id"])
+        except Exception as e:
+            await safe_edit(query, f"⛔ فشل الإلغاء من المزوّد:\n{e}", reply_markup=k_back(CB_MAIN))
+            return
+
+        db.set_order_cancelled(order_id)
+        await safe_edit(query, f"✅ تم إلغاء الطلب #{order_id}.", reply_markup=k_back(CB_MAIN))
+        return
+
+    # -------- Main navigation --------
     if data == CB_MAIN:
         await safe_edit(query, db.get_start_message(), reply_markup=k_main(is_admin(user_id)))
         return
@@ -187,14 +258,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "ℹ️ **المساعدة**\n\n"
             "• استخدم زر **شراء رقم 🇬🇧** للحصول على رقم.\n"
-            "• من **طلباتي** تتابع حالة الطلب.\n"
+            "• من **طلباتي** تتابع حالة الطلب وتحديث الكود.\n"
             "• زر **شراء رصيد** يرسل طلب شحن للأدمن.\n"
             "• يمكنك رؤية ID الخاص بك من **حسابي**."
         )
         await safe_edit(query, text, reply_markup=k_back(CB_MAIN), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Buy number (STUB)
+    # -------- Buy number (REAL) --------
     if data == CB_BUY:
         u = db.ensure_user(user_id)
         db.reset_daily_if_needed(user_id)
@@ -210,30 +281,68 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(query, f"رصيدك غير كافي.\nالسعر: {price:.2f}$", reply_markup=k_back(CB_MAIN))
             return
 
-        # Here provider integration would happen (not included).
+        # ثابت حسب طلبك (UK فقط) + service ثابت (عدله حسب مزودك إذا يلزم)
+        country = "UK"
+        service_code = "UK_SERVICE"
+
+        try:
+            res = provider.create_order(service=service_code, country=country)
+            provider_order_id = res["provider_order_id"]
+            number = res["number"]
+        except Exception as e:
+            await safe_edit(query, f"⛔ فشل إنشاء الطلب من المزوّد:\n{e}", reply_markup=k_back(CB_MAIN))
+            return
+
+        # خصم الرصيد بعد نجاح إنشاء الطلب
         if not is_admin(user_id):
-            db.deduct_balance(user_id, price, kind="deduct", note="Buy UK temp number (stub)")
+            db.deduct_balance(user_id, price, kind="deduct", note="Buy UK number")
             db.increment_daily(user_id)
 
+        order_id = db.create_order_row(
+            user_id=user_id,
+            country=country,
+            service_code=service_code,
+            sell_price=price,
+            provider_order_id=str(provider_order_id),
+            phone_number=str(number),
+            status="waiting",
+        )
+
         await safe_edit(
             query,
-            "✅ تم تسجيل عملية الشراء (نسخة تجريبية).\n"
-            "سيتم ربط مزوّد الأرقام لاحقًا داخل جدول orders.",
-            reply_markup=k_back(CB_MAIN)
+            f"✅ تم شراء رقم بنجاح\n\n"
+            f"📦 رقم الطلب: #{order_id}\n"
+            f"📞 الرقم: {number}\n"
+            f"⏳ الحالة: انتظار الكود...",
+            reply_markup=k_order_actions(order_id)
         )
         return
 
+    # -------- Orders list --------
     if data == CB_ORDERS:
-        await safe_edit(
-            query,
-            "📩 **طلباتي**\n\n"
-            "حالياً: ربط المزود غير مفعّل في هذه النسخة، لذلك لا يتم عرض الأكواد.\n"
-            "عند تفعيل الربط سيتم عرض الطلبات هنا.",
-            reply_markup=k_back(CB_MAIN),
-            parse_mode=ParseMode.MARKDOWN
-        )
+        orders = db.list_orders_for_user(user_id, limit=10)
+        if not orders:
+            await safe_edit(query, "📩 لا توجد طلبات بعد.", reply_markup=k_back(CB_MAIN))
+            return
+
+        lines = ["📩 **طلباتي (آخر 10)**\n"]
+        rows = []
+        for o in orders:
+            oid = o["id"]
+            status = o.get("status") or "-"
+            num = o.get("phone_number") or "-"
+            lines.append(f"• #{oid} | {status} | `{num}`")
+
+            rows.append([
+                InlineKeyboardButton("🔄 تحديث", callback_data=f"{CB_ORDER_REFRESH_PREFIX}{oid}"),
+                InlineKeyboardButton("❌ إلغاء", callback_data=f"{CB_ORDER_CANCEL_PREFIX}{oid}"),
+            ])
+
+        rows.append([InlineKeyboardButton("🔙 رجوع", callback_data=CB_MAIN)])
+        await safe_edit(query, "\n".join(lines), reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.MARKDOWN)
         return
 
+    # -------- Topup --------
     if data == CB_TOPUP:
         await safe_edit(
             query,
@@ -286,7 +395,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == CB_A_ORDERS:
-        await safe_edit(query, "📦 **إدارة الطلبات**\n\n(جاهزة للربط لاحقاً عبر جدول orders)", reply_markup=k_back(CB_ADMIN), parse_mode=ParseMode.MARKDOWN)
+        await safe_edit(query, "📦 **إدارة الطلبات**\n\n(الطلبات تُحفظ الآن في جدول orders)", reply_markup=k_back(CB_ADMIN), parse_mode=ParseMode.MARKDOWN)
         return
 
     if data == CB_A_STATS:
@@ -627,8 +736,7 @@ def main():
         raise RuntimeError("BOT_TOKEN is missing")
     if not ADMIN_IDS:
         raise RuntimeError("ADMIN_IDS is missing (comma-separated)")
-    # DATABASE_URL is validated when db connects; but better to fail early if empty:
-    # (db will raise clearer error if missing)
+
     db.init_db()
 
     app = Application.builder().token(BOT_TOKEN).build()
